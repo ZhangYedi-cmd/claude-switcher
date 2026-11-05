@@ -19,8 +19,8 @@ import zipfile
 
 
 OPTIONAL = ("IP一致", "DNS", "WebRTC", "客户端语言", "ASN属性", "生态可达性")
-ALL_CHECKS = ("代理内核", "TUN网卡", "出口IP", "出口白名单", "Clash冲突", "IP一致", "时区", "地区", "IPv6", "DNS",
-              "WebRTC", "保镖", "规则置顶", "Shadowrocket自检", "客户端语言", "ASN属性", "生态可达性")
+ALL_CHECKS = ("代理内核", "TUN网卡", "出口IP", "出口白名单", "Clash冲突", "双端出口", "IP一致", "时区", "地区", "IPv6", "DNS",
+              "DNS口径", "Type64", "WebRTC", "保镖", "规则置顶", "Shadowrocket自检", "403熔断", "客户端语言", "ASN属性", "生态可达性")
 DEFAULTS = {"disabled": [], "allowOptionalFailures": False, "logging": True}
 LOG_LIMIT = 512 * 1024
 
@@ -1196,6 +1196,158 @@ iphist_count() {
     awk '{print $1}' "$HIST" | sort -u | wc -l | tr -d ' '
 }
 
+# H24: 只把 API 的地区拒绝当成熔断。首页或无特征的 403 不熔断，响应正文不写日志。
+# 测试用 CLAUDE_SWITCHER_403_FIXTURE=403:region|403:other|401，不访问网络。
+circuit_path() {
+    if [ -n "${CLAUDE_SWITCHER_CIRCUIT_FILE:-}" ]; then
+        printf '%s\n' "$CLAUDE_SWITCHER_CIRCUIT_FILE"
+    else
+        printf '%s\n' "${BASE:-$HOME/.claude-switcher}/circuit-breaker"
+    fi
+}
+circuit_is_tripped() {
+    local path
+    path=$(circuit_path)
+    [ -f "$path" ] && grep -q '^tripped$' "$path"
+}
+circuit_trip() {
+    local path dir
+    path=$(circuit_path)
+    dir=$(dirname "$path")
+    mkdir -p "$dir"
+    printf 'tripped\n' > "$path"
+    chmod 600 "$path" 2>/dev/null || true
+}
+anthropic_region_probe() {
+    local fixture code body tmp
+    fixture="${CLAUDE_SWITCHER_403_FIXTURE:-}"
+    if [ -n "$fixture" ]; then
+        case "$fixture" in
+            403:region|region) echo trip; return ;;
+            *) echo ok; return ;;
+        esac
+    fi
+    tmp=$(mktemp "${TMPDIR:-/tmp}/claude-403.XXXXXX")
+    code=$(curl -s --max-time 8 -o "$tmp" -w '%{http_code}' https://api.anthropic.com/v1/models 2>/dev/null || true)
+    body=""
+    if [ "$code" = "403" ]; then
+        body=$(LC_ALL=C tr -cd '\11\12\15\40-\176' < "$tmp" | LC_ALL=C tr 'A-Z' 'a-z')
+    fi
+    rm -f "$tmp"
+    case "$code" in
+        200|204|301|302|307|308|401|404|405) echo ok ;;
+        403)
+            if printf '%s' "$body" | LC_ALL=C grep -Eq 'country|region|not available in your|unsupported location|request not allowed'; then
+                echo trip
+            else
+                echo unknown
+            fi
+            ;;
+        *) echo unknown ;;
+    esac
+}
+circuit_status() {
+    local probe
+    if circuit_is_tripped; then
+        echo "fail:已熔断,新会话拒启"
+        return
+    fi
+    probe=$(anthropic_region_probe)
+    case "$probe" in
+        trip)
+            circuit_trip
+            echo "fail:检测到地区拒绝,已熔断"
+            ;;
+        ok) echo "ok:未触发" ;;
+        *) echo "warn:未确认地区拒绝" ;;
+    esac
+}
+circuit_reset() {
+    rm -f "$(circuit_path)"
+    echo "OK:熔断已解除"
+}
+
+# H06: 显式 7890 与不带代理环境变量的系统路径。不打印地址，不改浏览器策略。
+_trace_ip() {
+    local proxy="${1:-}" trace ip
+    if [ -n "$proxy" ]; then
+        trace=$(env -u http_proxy -u https_proxy -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+            curl -s --max-time 8 --proxy "$proxy" --noproxy '' https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
+    else
+        trace=$(env -u http_proxy -u https_proxy -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+            curl -s --max-time 8 --noproxy '*' https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
+    fi
+    ip=$(printf '%s\n' "$trace" | LC_ALL=C sed -n 's/^ip=\([0-9][0-9]*\(\.[0-9][0-9]*\)\{3\}\)$/\1/p' | head -n 1)
+    printf '%s\n' "$ip"
+}
+dual_exit_status() {
+    local proxy cli sys
+    proxy="${CLAUDE_SWITCHER_PROXY:-http://127.0.0.1:7890}"
+    cli=$(_trace_ip "$proxy")
+    sys=$(_trace_ip "")
+    if [ -z "$cli" ] || [ -z "$sys" ]; then
+        echo "fail:无法确认两端出口"
+        return
+    fi
+    if [ "$cli" = "$sys" ]; then
+        echo "ok:一致"
+    else
+        echo "fail:不一致"
+    fi
+}
+
+# H10: 只在 ipv4hint 全部落在 198.18.0.0/16 时通过。没有提示或无法查询标未验证，不判通过。
+type64_status() {
+    local out hints bad h
+    if ! command -v dig >/dev/null 2>&1; then
+        echo "warn:未验证(无dig)"
+        return
+    fi
+    out=$( { dig +time=3 +tries=1 claude.ai HTTPS; dig +time=3 +tries=1 claude.ai TYPE64; } 2>/dev/null || true)
+    if [ -z "$out" ]; then
+        echo "warn:未验证(无应答)"
+        return
+    fi
+    hints=$(printf '%s\n' "$out" | LC_ALL=C sed -n 's/.*[Ii][Pp][Vv]4[Hh][Ii][Nn][Tt]=\([0-9][0-9.]*\).*/\1/p')
+    if [ -z "$hints" ]; then
+        echo "warn:未验证(无ipv4hint)"
+        return
+    fi
+    bad=0
+    while IFS= read -r h; do
+        [ -n "$h" ] || continue
+        case "$h" in
+            198.18.*) ;;
+            *) bad=1 ;;
+        esac
+    done <<EOF
+$hints
+EOF
+    if [ "$bad" -eq 1 ]; then
+        echo "fail:出现隧道外地址"
+    else
+        echo "ok:仅隧道地址"
+    fi
+}
+
+# H09: 能自动看的只有 AAAA 是否泄出，以及系统解析器属于本地/局域网/公网。不记录地址，不声称 #proxy 或 Secure DNS 已核。
+dns_posture_status() {
+    local aaaa ns kind
+    aaaa=$(dig +short +time=3 +tries=1 AAAA claude.ai 2>/dev/null | LC_ALL=C grep ':' | head -n 1 || true)
+    if [ -n "$aaaa" ]; then
+        echo "fail:AAAA有公网应答"
+        return
+    fi
+    ns=$(scutil --dns 2>/dev/null | LC_ALL=C awk '/nameserver\[0\]/ { print $3; exit }')
+    case "$ns" in
+        127.*|198.18.*) kind=本地或隧道 ;;
+        10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*) kind=局域网 ;;
+        "") kind=未知 ;;
+        *) kind=公网 ;;
+    esac
+    echo "warn:未验证(系统解析器=${kind};Secure DNS与#proxy未核)"
+}
+
 # ---------- 安全检查 ----------
 check() {
     load_check_config || { echo "FAIL:检查配置无效，请恢复默认设置"; return 1; }
@@ -1272,6 +1424,23 @@ check() {
     case "$sr_state" in
         ok:*) ;;
         *) fails="$fails;Shadowrocket自检:${sr_state#fail:}" ;;
+    esac
+    dual_state=$(dual_exit_status)
+    case "$dual_state" in
+        ok:*) ;;
+        *) fails="$fails;双端出口:${dual_state#fail:}" ;;
+    esac
+    type_state=$(type64_status)
+    case "$type_state" in
+        fail:*) fails="$fails;Type64:${type_state#fail:}" ;;
+    esac
+    dns_posture=$(dns_posture_status)
+    case "$dns_posture" in
+        fail:*) fails="$fails;DNS口径:${dns_posture#fail:}" ;;
+    esac
+    circuit_state=$(circuit_status)
+    case "$circuit_state" in
+        fail:*) fails="$fails;403熔断:${circuit_state#fail:}" ;;
     esac
 
     if ! check_disabled "客户端语言"; then
@@ -1563,6 +1732,10 @@ checkdetail() {
         fi
     fi
     echo "Shadowrocket自检=$(shadowrocket_selfcheck)"
+    echo "双端出口=$(dual_exit_status)"
+    echo "DNS口径=$(dns_posture_status)"
+    echo "Type64=$(type64_status)"
+    echo "403熔断=$(circuit_status)"
     # 12. Claude 客户端语言(单独设为英文,或系统首选语言为英文均可;防止 JS 层读出中文)
     if check_disabled "客户端语言"; then
         optional_result "客户端语言" ok
@@ -1733,10 +1906,9 @@ fix() {
 
     # B. 时区/IPv6/DNS缓存/保镖(需管理员权限,会弹一次密码框)
     tz=$(readlink /etc/localtime 2>/dev/null)
-    v6=$(networksetup -getinfo Wi-Fi 2>/dev/null | grep -i '^IPv6:')
     adminCmds=""
     [ "$tz" != "/var/db/timezone/zoneinfo/$TZ_TARGET" ] && adminCmds="${adminCmds}/usr/sbin/systemsetup -settimezone $TZ_TARGET; "
-    echo "$v6" | grep -qi 'off' || adminCmds="${adminCmds}networksetup -setv6off Wi-Fi; "
+    # 不调用 networksetup -setv6off。IPv6 仍记失败，关闭只由用户手工做。
     if ! launchctl print system/local.claude-bodyguard >/dev/null 2>&1; then
         adminCmds="${adminCmds}cp -X $HOME/.local/bin/local.claude-bodyguard.plist /Library/LaunchDaemons/ || exit 1; /usr/bin/xattr -d com.apple.quarantine /Library/LaunchDaemons/local.claude-bodyguard.plist 2>/dev/null || true; chown root:wheel /Library/LaunchDaemons/local.claude-bodyguard.plist || exit 1; chmod 644 /Library/LaunchDaemons/local.claude-bodyguard.plist || exit 1; launchctl bootstrap system /Library/LaunchDaemons/local.claude-bodyguard.plist || exit 1; launchctl print system/local.claude-bodyguard >/dev/null 2>&1 || exit 1; "
     fi
@@ -2703,6 +2875,8 @@ case "$operation" in
     set-check-config) "$0" _support config-set "${2:-}" ;;
     write-merge-rules) write_merge_rules ;;  # 隐藏入口:供安装器调用,保证两处合并逻辑一致
     fingerprint) fingerprint ;;
+    circuit-reset) circuit_reset ;;
+    bodyguard-status) bodyguard_status ;;
     *) echo "用法: claude-switch.sh check|checkdetail|fix|status|switch A|B|C|D|set-region|set-client <mode>|update [--check|--auto]|update-check|fingerprint|snapshot-export <A|B|C|D> <file>|snapshot-import <file> <A|B|C|D>|open-safe <url>|cli-info|cli [args...]|cli-current|export-diagnostics <file>|get-check-config|set-check-config <json>|diagnose-proxy [--proxy URL|--config FILE]"; exit 2 ;;
 esac
 # checkdetail 分支内部已保存返回码;其他分支取 case 的最终状态。

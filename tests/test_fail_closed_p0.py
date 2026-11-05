@@ -193,5 +193,131 @@ class BodyguardNativeKillTests(unittest.TestCase):
         self.assertFalse((self.root / "kill-args").exists())
 
 
+@unittest.skipUnless(sys.platform == "darwin", "macOS bash")
+class Phase3ProbeTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.core = CORE.read_text(encoding="utf-8")
+        self.bindir = self.root / "bin"
+        self.bindir.mkdir()
+
+    def run_bash(self, script, env_extra=None, timeout=8):
+        env = dict(os.environ, HOME=str(self.root), PATH=f"{self.bindir}:/usr/bin:/bin",
+                   CLAUDE_SWITCHER_CIRCUIT_FILE=str(self.root / "circuit"),
+                   CLAUDE_SWITCHER_PROXY="http://127.0.0.1:7890")
+        if env_extra:
+            env.update(env_extra)
+        return subprocess.run(["/bin/bash", "-c", script], env=env, text=True,
+                              capture_output=True, timeout=timeout)
+
+    def stub(self, name, body):
+        path = self.bindir / name
+        path.write_text(body, encoding="utf-8")
+        path.chmod(0o755)
+
+    def test_region_fixture_trips_without_network_and_generic_403_does_not(self):
+        script = "\n".join([
+            "BASE=\"$HOME/.claude-switcher\"",
+            extract(self.core, "circuit_path"),
+            extract(self.core, "circuit_is_tripped"),
+            extract(self.core, "circuit_trip"),
+            extract(self.core, "anthropic_region_probe"),
+            extract(self.core, "circuit_status"),
+            'echo "probe=$(anthropic_region_probe)"',
+            'echo "status=$(circuit_status)"',
+            'echo "again=$(circuit_status)"',
+        ])
+        region = self.run_bash(script, {"CLAUDE_SWITCHER_403_FIXTURE": "403:region"})
+        self.assertEqual(region.returncode, 0, region.stdout + region.stderr)
+        self.assertIn("probe=trip", region.stdout)
+        self.assertIn("status=fail:检测到地区拒绝,已熔断", region.stdout)
+        self.assertIn("again=fail:已熔断,新会话拒启", region.stdout)
+        (self.root / "circuit").unlink()
+        other = self.run_bash(script, {"CLAUDE_SWITCHER_403_FIXTURE": "403:other"})
+        self.assertIn("probe=ok", other.stdout)
+        self.assertIn("status=ok:未触发", other.stdout)
+        self.assertFalse((self.root / "circuit").exists())
+
+    def test_dual_exit_hides_addresses_and_fails_closed_on_mismatch(self):
+        self.stub("curl", """#!/bin/sh
+printf '%s\\n' "$*" >> "$HOME/curl-args"
+case "$*" in
+  *--proxy*) printf 'ip=203.0.113.10\\nloc=US\\n' ;;
+  *) printf 'ip=198.51.100.9\\nloc=US\\n' ;;
+esac
+""")
+        script = "\n".join([
+            extract(self.core, "_trace_ip"),
+            extract(self.core, "dual_exit_status"),
+            "dual_exit_status",
+        ])
+        run = self.run_bash(script)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(run.stdout.strip(), "fail:不一致")
+        self.assertNotIn("203.0.113.10", run.stdout)
+        self.assertNotIn("198.51.100.9", run.stdout)
+        self.stub("curl", """#!/bin/sh
+printf 'ip=203.0.113.10\\nloc=US\\n'
+""")
+        same = self.run_bash(script)
+        self.assertEqual(same.stdout.strip(), "ok:一致")
+
+    def test_type64_unverified_without_hint_and_fails_on_public_hint(self):
+        script = "\n".join([extract(self.core, "type64_status"), "type64_status"])
+        self.stub("dig", "#!/bin/sh\nprintf 'claude.ai. 30 IN HTTPS 1 . alpn=\"h2\"\\n'\n")
+        unverified = self.run_bash(script)
+        self.assertIn("warn:未验证", unverified.stdout)
+        self.assertNotIn("ok:", unverified.stdout)
+        self.stub("dig", "#!/bin/sh\nprintf 'ipv4hint=203.0.113.10\\n'\n")
+        leaked = self.run_bash(script)
+        self.assertEqual(leaked.stdout.strip(), "fail:出现隧道外地址")
+        self.assertNotIn("203.0.113.10", leaked.stdout)
+        self.stub("dig", "#!/bin/sh\nprintf 'ipv4hint=198.18.0.8\\n'\n")
+        tunneled = self.run_bash(script)
+        self.assertEqual(tunneled.stdout.strip(), "ok:仅隧道地址")
+
+    def test_dns_posture_does_not_print_resolver_and_flags_aaaa(self):
+        script = "\n".join([extract(self.core, "dns_posture_status"), "dns_posture_status"])
+        self.stub("dig", "#!/bin/sh\nexit 0\n")
+        self.stub("scutil", "#!/bin/sh\nprintf 'nameserver[0] : 192.0.2.1\\n'\n")
+        run = self.run_bash(script)
+        self.assertIn("warn:未验证", run.stdout)
+        self.assertIn("公网", run.stdout)
+        self.assertNotIn("192.0.2.1", run.stdout)
+        self.stub("dig", "#!/bin/sh\nprintf '2001:db8::1\\n'\n")
+        leaked = self.run_bash(script)
+        self.assertEqual(leaked.stdout.strip(), "fail:AAAA有公网应答")
+        self.assertNotIn("2001:db8::1", leaked.stdout)
+
+    def test_bodyguard_simulated_region_block_kills_without_calling_curl(self):
+        guard = GUARD.read_text(encoding="utf-8")
+        guard = guard.replace("__HOME__", str(self.root)).replace("__PROXY_MODE__", "shadowrocket")
+        script = self.root / "bodyguard.sh"
+        script.write_text(guard, encoding="utf-8")
+        (self.root / "Library" / "Logs").mkdir(parents=True)
+        allow = self.root / ".config" / "claude-env"
+        allow.mkdir(parents=True)
+        (allow / "exit-ips.allow").write_text("203.0.113.10\n", encoding="utf-8")
+        self.stub("ifconfig", "#!/bin/sh\necho 'inet 198.18.0.1'\n")
+        self.stub("scutil", "#!/bin/sh\necho '(Connected) VPN (com.liguangming.Shadowrocket)'\n")
+        self.stub("pgrep", "#!/bin/sh\nexit 1\n")
+        self.stub("id", "#!/bin/sh\necho 4242\n")
+        self.stub("curl", "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/curl-args\"\nprintf 'ip=203.0.113.10\\n'\n")
+        self.stub("kill", "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/kill-args\"\n")
+        self.stub("ps", "#!/bin/sh\nprintf '  501  4242 /Users/u /Users/u/.local/bin/claude\\n'\n")
+        env = dict(os.environ, HOME=str(self.root), PATH=f"{self.bindir}:/usr/bin:/bin",
+                   CLAUDE_SWITCHER_403_FIXTURE="403:region", CLAUDE_SWITCHER_TEST_ROOT=str(self.root))
+        run = subprocess.run(["/bin/bash", "-c", 'enable -n kill\n. "$1"', "guard", str(script)],
+                             env=env, capture_output=True, text=True, timeout=5)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        args = (self.root / "curl-args").read_text(encoding="utf-8")
+        self.assertNotIn("anthropic", args, "模拟熔断不得再请求 Anthropic")
+        self.assertEqual((self.root / "kill-args").read_text(encoding="utf-8").strip(), "-TERM 501")
+        log = (self.root / "Library" / "Logs" / "claude-bodyguard.log").read_text(encoding="utf-8")
+        self.assertIn("403熔断", log)
+
+
 if __name__ == "__main__":
     unittest.main()

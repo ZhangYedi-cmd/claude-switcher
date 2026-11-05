@@ -101,10 +101,10 @@ esac''')
             self.assertIn(name + "=skip:用户已禁用", run.stdout)
         calls = self.calls.read_text(encoding="utf-8") if self.calls.exists() else ""
         self.assertNotIn("python3", calls)
-        self.assertEqual(len(re.findall(r"(?m)^dig$", calls)), 3,
-                         "三次 dig 应全部来自不可关闭的规则置顶检查")
+        self.assertEqual(len(re.findall(r"(?m)^dig$", calls)), 6,
+                         "规则置顶 3 次，外加 Type64 两次与 AAAA 一次")
         curl_count = len(re.findall(r"(?m)^curl$", calls))
-        self.assertEqual(curl_count, 1, "禁用 ASN 与生态检查后只应探测出口")
+        self.assertEqual(curl_count, 4, "出口、双端两条与 403 探针各一次")
 
     def test_all_six_optional_names_are_accepted(self):
         self.write_settings({"disabled": list(OPTIONAL)})

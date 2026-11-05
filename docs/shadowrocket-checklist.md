@@ -66,16 +66,20 @@ DNS 通过不证明 WebRTC 通过，反过来也不证明。纯 CLI 没有浏览
 
 `claude` 的入口仍是 `~/.local/bin/claude-proxy`，再 `exec` 原生 `~/.local/bin/claude`。不要改用 `claude-switch.sh cli` 做多账号映射。
 
-`~/.config/claude-env/proxy.zsh` 不由本补丁修改。可选联动默认关闭。若以后要在 `proxy_check` 成功之后再跑一轮 switcher 总检，需你自己把下面这一行加进 `proxy.zsh` 的副本，并先备份：
+可选联动默认关闭，加在现有 `proxy_check` 成功之后，不改白名单和原来的拒启条件。改文件前先备份。
 
 ```sh
-# 默认不要加。CLAUDE_SWITCHER_LINK=1 时才调用；失败则拒启。
-if [[ ${CLAUDE_SWITCHER_LINK:-0} == 1 ]]; then
-  "$HOME/.local/bin/claude-switch.sh" check || return $?
+_exit_ip_check || return $?
+if [[ ${CLAUDE_SWITCHER_LINK:-0} != 1 ]]; then
+  return 0
+fi
+"$HOME/.local/bin/claude-switch.sh" check || return $?
+if [[ ${CLAUDE_SWITCHER_REQUIRE_BODYGUARD:-0} == 1 ]]; then
+  # bodyguard-status 不是 ok: 则 return 69
 fi
 ```
 
-不设置 `CLAUDE_SWITCHER_LINK` 时，启动门只做原来的代理监听、Anthropic HTTPS 和白名单检查。
+不设置 `CLAUDE_SWITCHER_LINK` 时，启动门只做原来的代理监听、Anthropic HTTPS 和白名单检查。`CLAUDE_SWITCHER_REQUIRE_BODYGUARD` 也默认关闭。
 
 ## 保镖安装
 
@@ -83,9 +87,14 @@ fi
 
 用户级脚本由当前用户拥有，能结束当前用户的 Claude Code，不能代替 root 安装的防改写边界。
 
+## 已落地的后续项
+
+- H24：只熔断 `api.anthropic.com` 响应里带地区拒绝特征的 403。普通 403 记为未确认，不熔断，正文不写日志。熔断后新的 `check` 拒启，保镖结束正在运行的原生 `claude`。解除用 `claude-switch.sh circuit-reset`。可用 `CLAUDE_SWITCHER_403_FIXTURE=403:region` 模拟，不访问网络。
+- H06：比较经 `127.0.0.1:7890` 的出口和去掉代理环境变量后的系统路径。不一致或有一端确认不了都失败，输出里不写地址。这不读取 Chrome，也不改 MDM。
+- H10：查询 HTTPS / TYPE64。只有 `ipv4hint` 全部落在 `198.18.0.0/16` 才通过；没有提示记未验证，不判通过。
+- H09：AAAA 一旦有公网应答就失败。系统解析器只标成本地、局域网或公网，不记录地址。`#proxy`、Secure DNS 和 whoami 仍是未验证。
+
 ## 尚未做（follow-up）
 
-- H24：403 熔断。首页探测出现 403 不足以熔断，需要区分页面拦截和 API 的地区拒绝，并避免读取 `~/.claude` 里的凭证。
-- H06：浏览器出口与 Claude Code 出口比对。
-- H10：DNS Type 64/65。
-- H09 的 `whoami` TXT / Secure DNS，以及 H13 的浏览器 ICE 候选：保持未验证，直到有一次不改配置的人工复核。
+- H09 的 whoami TXT、Secure DNS，以及 H13 的浏览器 ICE 候选和通话功能：保持未验证。
+- 不导入 agent-route 规则集，不覆盖 Shadowrocket，不关闭系统 IPv6。

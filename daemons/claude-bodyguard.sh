@@ -95,11 +95,61 @@ allowlist_block_reason() {
     return 0
 }
 
+# H24: 地区拒绝才熔断。无特征 403 不熔断，正文不写日志。10 分钟内不重复探测。
+# CLAUDE_SWITCHER_403_FIXTURE=403:region 可模拟，不访问网络。
+region_block_reason() {
+    local circuit stamp now last=0 code tmp fixture
+    circuit="$HOME_DIR/.claude-switcher/circuit-breaker"
+    stamp="$HOME_DIR/.claude-switcher/circuit-probe-at"
+    if [ -f "$circuit" ] && grep -q '^tripped$' "$circuit"; then
+        echo "403熔断"
+        return 0
+    fi
+    fixture="${CLAUDE_SWITCHER_403_FIXTURE:-}"
+    if [ -z "$fixture" ]; then
+        now=$(date +%s)
+        if [ -f "$stamp" ]; then
+            last=$(LC_ALL=C tr -cd '0-9' < "$stamp")
+            [ -n "$last" ] || last=0
+        fi
+        if [ $((now - last)) -lt 600 ]; then
+            return 0
+        fi
+        mkdir -p "$HOME_DIR/.claude-switcher"
+        printf '%s\n' "$now" > "$stamp"
+    fi
+    if [ -n "$fixture" ]; then
+        case "$fixture" in
+            403:region|region) code=trip ;;
+            *) return 0 ;;
+        esac
+    else
+        tmp=$(mktemp "${TMPDIR:-/tmp}/claude-403.XXXXXX")
+        code=$(curl -s --max-time 8 -o "$tmp" -w '%{http_code}' https://api.anthropic.com/v1/models 2>/dev/null || true)
+        if [ "$code" = "403" ] && LC_ALL=C grep -Eiq 'country|region|not available in your|unsupported location|request not allowed' "$tmp"; then
+            code=trip
+        else
+            code=ok
+        fi
+        rm -f "$tmp"
+    fi
+    if [ "$code" = "trip" ]; then
+        mkdir -p "$HOME_DIR/.claude-switcher"
+        printf 'tripped\n' > "$circuit"
+        chmod 600 "$circuit" 2>/dev/null || true
+        echo "403熔断"
+    fi
+    return 0
+}
+
 reason=""
 if [ "$ok" -eq 0 ]; then
     reason="代理离线(内核或TUN丢失)"
 else
     reason=$(allowlist_block_reason)
+    if [ -z "$reason" ]; then
+        reason=$(region_block_reason)
+    fi
 fi
 
 if [ -n "$reason" ]; then

@@ -236,6 +236,10 @@ launchctl() { return 0; }
 exit_allow_status() { echo "ok:fixture"; }
 clash_verge_conflict() { echo "ok:fixture"; }
 shadowrocket_selfcheck() { echo "ok:fixture"; }
+dual_exit_status() { echo "ok:fixture"; }
+type64_status() { echo "warn:fixture"; }
+dns_posture_status() { echo "warn:fixture"; }
+circuit_status() { echo "ok:fixture"; }
 """
         env = dict(os.environ, HOME=str(self.root), PATH=f"{self.fakebin}:/usr/bin:/bin")
         src = harness + '\n' + guard_fn + '\n' + check_fn + '\ncheck\n'
