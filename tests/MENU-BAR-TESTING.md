@@ -29,7 +29,7 @@ cat > _trash/menu-bar-demo/fake-core.sh <<'SH'
 #!/bin/bash
 case "$1" in
   checkdetail)
-    for key in 代理内核 TUN网卡 出口IP IP一致 时区 地区 IPv6 DNS WebRTC 保镖 规则置顶 客户端语言 ASN属性 生态可达性; do
+    for key in 代理内核 TUN网卡 出口IP 出口白名单 Clash冲突 IP一致 时区 地区 IPv6 DNS WebRTC 保镖 规则置顶 Shadowrocket自检 客户端语言 ASN属性 生态可达性; do
       if [ "$key" = ASN属性 ]; then echo "$key=warn:演示机房"; else echo "$key=ok:演示数据"; fi
     done ;;
   status) echo 'current=A hasA=1 hasB=1 hasC=1 hasD=0 accounts=A,B,C accA=1.2G@2026-10-20 accB=900M@2026-10-19 accC=2.0G@2026-10-18' ;;

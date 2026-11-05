@@ -19,8 +19,8 @@ import zipfile
 
 
 OPTIONAL = ("IP一致", "DNS", "WebRTC", "客户端语言", "ASN属性", "生态可达性")
-ALL_CHECKS = ("代理内核", "TUN网卡", "出口IP", "IP一致", "时区", "地区", "IPv6", "DNS",
-              "WebRTC", "保镖", "规则置顶", "客户端语言", "ASN属性", "生态可达性")
+ALL_CHECKS = ("代理内核", "TUN网卡", "出口IP", "出口白名单", "Clash冲突", "IP一致", "时区", "地区", "IPv6", "DNS",
+              "WebRTC", "保镖", "规则置顶", "Shadowrocket自检", "客户端语言", "ASN属性", "生态可达性")
 DEFAULTS = {"disabled": [], "allowOptionalFailures": False, "logging": True}
 LOG_LIMIT = 512 * 1024
 
@@ -1208,6 +1208,16 @@ check() {
     ip=$(echo "$trace" | grep '^ip=' | cut -d= -f2)
     loc=$(echo "$trace" | grep '^loc=' | cut -d= -f2)
     [ "$loc" = "$COUNTRY_TARGET" ] || fails="$fails;出口IP异常(${ip:-无}/${loc:-未知},期望$COUNTRY_TARGET)"
+    allow_state=$(exit_allow_status "$ip")
+    case "$allow_state" in
+        ok:*) ;;
+        *) fails="$fails;出口白名单:${allow_state#fail:}" ;;
+    esac
+    conflict_state=$(clash_verge_conflict)
+    case "$conflict_state" in
+        ok:*) ;;
+        *) fails="$fails;Clash冲突:${conflict_state#fail:}" ;;
+    esac
     ipwarn=""
     if ! check_disabled "IP一致"; then
         lastip=""; [ -f "$BASE/lastip" ] && lastip=$(cat "$BASE/lastip")
@@ -1258,6 +1268,11 @@ check() {
     else
         route_ok || fails="$fails;置顶规则缺失(未命中:${ROUTE_MISSED# })"
     fi
+    sr_state=$(shadowrocket_selfcheck)
+    case "$sr_state" in
+        ok:*) ;;
+        *) fails="$fails;Shadowrocket自检:${sr_state#fail:}" ;;
+    esac
 
     if ! check_disabled "客户端语言"; then
         defaults read com.anthropic.claudefordesktop AppleLanguages 2>/dev/null | grep -q 'en-US' || {
@@ -1341,14 +1356,111 @@ webrtc_status() {
     esac
 }
 
-# 保镖脚本由 root 安装，MODE 在安装时写死。核心切客户端后必须检测模式一致性，
-# 否则旧保镖可能按错误的代理进程状态关闭 Claude，单看 launchctl 在线会误报成功。
-bodyguard_status() {
-    if ! launchctl print system/local.claude-bodyguard >/dev/null 2>&1; then
-        echo 'fail:未安装'
+# H04: 与 claude-proxy 共用一份白名单，只读，不另存、不改 proxy.zsh。
+# 注释(#)与空行忽略，只认 IPv4。文件缺失、不可读、为空、探测不到出口或不在名单内一律 fail。
+EXIT_ALLOW_FILE="${EXIT_IP_ALLOW_FILE:-$HOME/.config/claude-env/exit-ips.allow}"
+exit_allow_ips() {
+    [ -r "$EXIT_ALLOW_FILE" ] || return 1
+    local line
+    while IFS= read -r line || [ -n "$line" ]; do
+        line=${line%%#*}
+        line=${line#"${line%%[![:space:]]*}"}
+        line=${line%"${line##*[![:space:]]}"}
+        [ -n "$line" ] || continue
+        if [[ "$line" =~ ^[0-9]+(\.[0-9]+){3}$ ]]; then
+            printf '%s\n' "$line"
+        fi
+    done < "$EXIT_ALLOW_FILE"
+}
+exit_allow_status() {
+    local ip="$1" n got
+    if [ ! -e "$EXIT_ALLOW_FILE" ]; then
+        echo "fail:白名单文件不存在"
         return
     fi
+    if [ ! -r "$EXIT_ALLOW_FILE" ]; then
+        echo "fail:白名单文件不可读"
+        return
+    fi
+    n=$(exit_allow_ips | wc -l | tr -d ' ')
+    if [ "${n:-0}" = "0" ]; then
+        echo "fail:白名单为空"
+        return
+    fi
+    if [[ ! "$ip" =~ ^[0-9]+(\.[0-9]+){3}$ ]]; then
+        echo "fail:未获取到出口IP"
+        return
+    fi
+    while IFS= read -r got; do
+        if [ "$got" = "$ip" ]; then
+            echo "ok:命中"
+            return
+        fi
+    done < <(exit_allow_ips)
+    echo "fail:不在白名单"
+}
+
+# H02: Shadowrocket / 其他客户端与 Clash Verge 的 TUN 不能同时接管。
+# 只认内核 verge-mihomo 与 Clash Verge 主程序。常驻的 privileged helper 单独存在不算冲突。
+clash_verge_conflict() {
+    if [ "$PROXY_MODE" = "clash-verge" ]; then
+        echo "ok:当前客户端为 Clash Verge"
+        return
+    fi
+    local why=""
+    if pgrep -f '[v]erge-mihomo' >/dev/null 2>&1; then
+        why="verge-mihomo"
+    fi
+    if pgrep -f '/Clash Verge.app/Contents/MacOS/' >/dev/null 2>&1; then
+        why="${why:+$why+}主程序"
+    fi
+    if [ -n "$why" ]; then
+        echo "fail:与 $(proxy_name) 同时运行($why)，请退出 Clash Verge，只保留一个 TUN"
+    else
+        echo "ok:未发现 Clash Verge 内核或主程序"
+    fi
+}
+
+# H08: 只检查，不改写 Shadowrocket 规则。链式节点与强制路由仍需手工确认。
+shadowrocket_selfcheck() {
+    if [ "$PROXY_MODE" != "shadowrocket" ]; then
+        echo "ok:不适用"
+        return
+    fi
+    local miss="" nc_list
+    if ! pgrep -f '/Applications/Shadowrocket.app/Contents/MacOS/Shadowrocket' >/dev/null 2>&1; then
+        miss="$miss 进程未运行"
+    fi
+    nc_list=$(scutil --nc list 2>/dev/null || true)
+    if ! printf '%s\n' "$nc_list" | grep 'com.liguangming.Shadowrocket' | grep -q '(Connected)'; then
+        miss="$miss VPN未连接"
+    fi
+    if ! nc -z -G 1 -w 1 127.0.0.1 7890 >/dev/null 2>&1; then
+        miss="$miss 127.0.0.1:7890未监听"
+    fi
+    if ! route_ok; then
+        miss="$miss 域名未进隧道(${ROUTE_MISSED# })"
+    fi
+    if [ -n "$miss" ]; then
+        echo "fail:${miss# }。不改写规则，请按 docs/shadowrocket-checklist.md 手工确认"
+    else
+        echo "ok:进程/VPN/7890/域名隧道通过;强制路由与链式节点仍须手工确认"
+    fi
+}
+
+# 保镖脚本由 root 安装，MODE 在安装时写死。没有系统级守护时，接受同一 Label 的用户级 LaunchAgent。
+# 核心切客户端后必须检测模式一致性，否则旧保镖可能按错误的代理进程状态关闭 Claude。
+bodyguard_status() {
     local guard="/Library/Application Support/claude-switcher/claude-bodyguard.sh"
+    local scope="系统级"
+    if ! launchctl print system/local.claude-bodyguard >/dev/null 2>&1; then
+        guard="$HOME/.claude-switcher/claude-bodyguard.sh"
+        scope="用户级"
+        if ! launchctl print "gui/$(id -u)/local.claude-bodyguard" >/dev/null 2>&1 || [ ! -r "$guard" ]; then
+            echo 'fail:未安装'
+            return
+        fi
+    fi
     if [ ! -r "$guard" ]; then
         echo 'fail:守护脚本不可读或缺失(请重新运行安装器)'
         return
@@ -1365,7 +1477,7 @@ bodyguard_status() {
     fi
     local lastkill
     lastkill=$(tail -1 "$HOME/Library/Logs/claude-bodyguard.log" 2>/dev/null | cut -c1-40)
-    echo "ok:${lastkill:-待命}"
+    echo "ok:${scope}:${lastkill:-待命}"
 }
 
 # 逐项输出检查结果(供UI使用): 名称=ok|fail:细节
@@ -1380,10 +1492,12 @@ checkdetail() {
         echo "代理内核=fail:$(proxy_name) 未运行"
     fi
     if tun_up; then echo 'TUN网卡=ok'; else echo 'TUN网卡=fail:不在线'; fi
+    echo "Clash冲突=$(clash_verge_conflict)"
     trace=$(curl -s --max-time 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)
     ip=$(echo "$trace" | grep '^ip=' | cut -d= -f2)
     loc=$(echo "$trace" | grep '^loc=' | cut -d= -f2)
     if [ "$loc" = "$COUNTRY_TARGET" ]; then echo "出口IP=ok:$ip/$loc"; else echo "出口IP=fail:${ip:-无}/${loc:-未知}(期望$COUNTRY_TARGET)"; fi
+    echo "出口白名单=$(exit_allow_status "$ip")"
     if check_disabled "IP一致"; then
         optional_result "IP一致" ok
     else
@@ -1445,6 +1559,7 @@ checkdetail() {
             echo "规则置顶=fail:未命中(${ROUTE_MISSED# }),请在 $(proxy_name) 中自行加置顶规则"
         fi
     fi
+    echo "Shadowrocket自检=$(shadowrocket_selfcheck)"
     # 12. Claude 客户端语言(单独设为英文,或系统首选语言为英文均可;防止 JS 层读出中文)
     if check_disabled "客户端语言"; then
         optional_result "客户端语言" ok
@@ -2216,9 +2331,19 @@ cli_config_dir() {
 
 cli_pids() {
     local uid="${1:-$(id -u)}"
-    ps -axo pid=,uid=,comm=,args= | awk -v uid="$uid" '
-        $2 == uid && ($3 ~ /(^|\/)(claude|claude\.exe)$/ ||
-        ($3 ~ /(^|\/)(node|bun)$/ && $5 ~ /(^|\/)@anthropic-ai\/claude-code\/(bin\/claude(\.exe)?|cli\.js)$/)) { print $1 }'
+    # macOS comm 列最多约 16 字符，~/.local/bin/claude 会显示成 /Users/<name>，完整路径在 args。
+    # LC_ALL=C：某条进程参数含非法 UTF-8 时，UTF-8 awk 会整表中断，导致一个进程都不杀。
+    ps -axww -o pid=,uid=,comm=,args= 2>/dev/null | LC_ALL=C awk -v uid="$uid" '
+        function native_claude(s) {
+            return (s ~ /(^|\/)\.local\/bin\/claude$/ || s ~ /(^|\/)\.local\/share\/claude\/versions\/[^\/]+$/)
+        }
+        $2 == uid {
+            hit = 0
+            if ($3 ~ /(^|\/)(claude|claude\.exe)$/) hit = 1
+            if ($3 ~ /(^|\/)(node|bun)$/ && $5 ~ /(^|\/)@anthropic-ai\/claude-code\/(bin\/claude(\.exe)?|cli\.js)$/) hit = 1
+            for (i = 3; i <= NF; i++) if (native_claude($i)) hit = 1
+            if (hit) print $1
+        }'
 }
 
 quit_cli() {
