@@ -60,6 +60,11 @@ class SetClientTests(unittest.TestCase):
         script = self.root / "installed-bodyguard.sh"
         script.write_text(guard, encoding="utf-8")
         (self.root / "Library" / "Logs").mkdir(parents=True)
+        allow = self.root / ".config" / "claude-env"
+        allow.mkdir(parents=True)
+        (allow / "exit-ips.allow").write_text("203.0.113.10\n", encoding="utf-8")
+        (self.fakebin / "curl").write_text("#!/bin/sh\nprintf '%s\\n' 'ip=203.0.113.10'\n", encoding="utf-8")
+        (self.fakebin / "curl").chmod(0o755)
         (self.fakebin / "ifconfig").write_text("#!/bin/sh\necho 'inet 198.18.0.1'\n", encoding="utf-8")
         (self.fakebin / "pgrep").write_text(
             "#!/bin/sh\ncase \"$*\" in *FlClashCore*|*Claude.app*) exit 0 ;; *) exit 1 ;; esac\n",
@@ -125,12 +130,16 @@ class SetClientTests(unittest.TestCase):
 
     def test_bodyguard_online_never_kills_cli(self):
         script = self.install_guard("clash-verge")
+        allow = self.root / ".config" / "claude-env"
+        allow.mkdir(parents=True)
+        (allow / "exit-ips.allow").write_text("# fixture\n203.0.113.10\n", encoding="utf-8")
         self.stub("ifconfig", "#!/bin/sh\necho 'inet 198.18.0.1'\n")
         self.stub("pgrep", "#!/bin/sh\ncase \"$*\" in *Claude.app*) exit 1 ;; *) exit 0 ;; esac\n")
         self.stub("pkill", "#!/bin/sh\ntouch \"$CLAUDE_SWITCHER_TEST_ROOT/pkill-called\"\n")
         self.stub("id", "#!/bin/sh\necho 0\n")
         self.stub("stat", "#!/bin/sh\necho 4242\n")
         self.stub("kill", "#!/bin/sh\ntouch \"$CLAUDE_SWITCHER_TEST_ROOT/kill-called\"\n")
+        self.stub("curl", "#!/bin/sh\nprintf '%s\\n' 'ip=203.0.113.10' 'loc=US'\n")
         self.stub("ps", "#!/bin/sh\ncat <<'EOF'\n"
                         "  101  4242 claude          /usr/local/bin/claude --continue\n"
                         "  102  4242 node            /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js\n"
@@ -224,6 +233,13 @@ dig() { echo '198.18.0.1'; }
 webrtc_status() { echo 'ok:fixture'; }
 route_ok() { return 0; }
 launchctl() { return 0; }
+exit_allow_status() { echo "ok:fixture"; }
+clash_verge_conflict() { echo "ok:fixture"; }
+shadowrocket_selfcheck() { echo "ok:fixture"; }
+dual_exit_status() { echo "ok:fixture"; }
+type64_status() { echo "warn:fixture"; }
+dns_posture_status() { echo "warn:fixture"; }
+circuit_status() { echo "ok:fixture"; }
 """
         env = dict(os.environ, HOME=str(self.root), PATH=f"{self.fakebin}:/usr/bin:/bin")
         src = harness + '\n' + guard_fn + '\n' + check_fn + '\ncheck\n'

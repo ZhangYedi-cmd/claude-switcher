@@ -1,7 +1,7 @@
 import Foundation
 import AppKit
 
-private let auditKeys = ["代理内核", "TUN网卡", "出口IP", "IP一致", "时区", "地区", "IPv6", "DNS", "WebRTC", "保镖", "规则置顶", "客户端语言", "ASN属性", "生态可达性"]
+private let auditKeys = ["代理内核", "TUN网卡", "出口IP", "出口白名单", "双端出口", "Clash冲突", "IP一致", "时区", "地区", "IPv6", "DNS", "DNS口径", "Type64", "WebRTC", "保镖", "规则置顶", "Shadowrocket自检", "403熔断", "客户端语言", "ASN属性", "生态可达性"]
 
 private struct TestFailure: Error, CustomStringConvertible {
     let description: String

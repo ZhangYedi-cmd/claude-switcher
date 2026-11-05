@@ -51,14 +51,21 @@ final class VM: ObservableObject {
         CheckRow(name: "代理内核", icon: "cpu"),
         CheckRow(name: "TUN 网卡", icon: "cable.connector"),
         CheckRow(name: "出口 IP", icon: "globe.americas"),
+        CheckRow(name: "出口白名单", icon: "checklist"),
+        CheckRow(name: "双端出口", icon: "arrow.left.arrow.right"),
+        CheckRow(name: "Clash 冲突", icon: "exclamationmark.triangle"),
         CheckRow(name: "IP 与上次一致", icon: "checkmark.seal"),
         CheckRow(name: "时区", icon: "clock"),
         CheckRow(name: "地区", icon: "flag"),
         CheckRow(name: "IPv6 关闭", icon: "6.circle"),
         CheckRow(name: "DNS 走隧道", icon: "magnifyingglass"),
+        CheckRow(name: "DNS 口径", icon: "network"),
+        CheckRow(name: "Type 64/65", icon: "number"),
         CheckRow(name: "WebRTC", icon: "eye.slash"),
         CheckRow(name: "保镖在线", icon: "hand.raised"),
         CheckRow(name: "规则置顶", icon: "list.number"),
+        CheckRow(name: "Shadowrocket 自检", icon: "list.bullet.rectangle"),
+        CheckRow(name: "403 熔断", icon: "bolt.slash"),
         CheckRow(name: "客户端语言", icon: "abc"),
         CheckRow(name: "ASN 属性", icon: "building.columns"),
         CheckRow(name: "生态可达性", icon: "antenna.radiowaves.left.and.right"),
@@ -222,9 +229,12 @@ final class VM: ObservableObject {
             var duplicated = false
             let keyMap: [String: String] = [
                 "代理内核": "代理内核", "TUN网卡": "TUN 网卡", "出口IP": "出口 IP",
+                "出口白名单": "出口白名单", "双端出口": "双端出口", "Clash冲突": "Clash 冲突",
                 "IP一致": "IP 与上次一致", "时区": "时区", "地区": "地区",
-                "IPv6": "IPv6 关闭", "DNS": "DNS 走隧道", "WebRTC": "WebRTC",
+                "IPv6": "IPv6 关闭", "DNS": "DNS 走隧道", "DNS口径": "DNS 口径",
+                "Type64": "Type 64/65", "WebRTC": "WebRTC",
                 "保镖": "保镖在线", "规则置顶": "规则置顶",
+                "Shadowrocket自检": "Shadowrocket 自检", "403熔断": "403 熔断",
                 "客户端语言": "客户端语言", "ASN属性": "ASN 属性", "生态可达性": "生态可达性",
             ]
             for line in result.output.split(separator: "\n") {
@@ -1291,7 +1301,7 @@ struct NoticeView: View {
 
     let sections: [(String, String)] = [
         ("Full-Tunnel 全流量接管", "基于 TUN 虚拟网卡的内核级流量劫持，配合 Fake-IP DNS 解析机制，包括 UDP 在内的全部出站流量在网络栈底层被强制路由至加密隧道，应用层无法旁路。"),
-        ("Environment Audit 环境一致性审计", "每次启动前执行 14 项环境指纹审计：Egress IP 归属地与 ASN 属性、时区与 Geo-location 一致性、Locale、IPv6 双栈旁路、DNS Leak、WebRTC/STUN 多节点交叉探测等。硬性安全项失败即 Block-on-Fail；仅显式配置的非关键项可跳过或降级，skip 不表示通过。"),
+        ("Environment Audit 环境一致性审计", "每次启动前执行环境指纹审计：Egress IP 归属地与 ASN 属性、出口白名单、Clash Verge 冲突、Shadowrocket 自检、时区与 Geo-location 一致性、Locale、IPv6 双栈旁路、DNS Leak、WebRTC/STUN 多节点交叉探测等。硬性安全项失败即 Block-on-Fail；仅显式配置的非关键项可跳过或降级，skip 不表示通过。"),
         ("Kill-Switch 断网急停", "常驻守护进程以 10 秒周期巡检隧道健康度，隧道中断即刻终止受保护进程，将裸连窗口压缩到秒级。进程级急停，非防火墙级保证，边界详见 SECURITY.md。"),
         ("Pinned Routing 域名置顶路由", "目标服务全家族域名及其生态依赖（Turnstile 人机验证、Telemetry 遥测、Payment 支付、Support 组件）置顶锁定代理路由，优先级高于任何第三方分流规则集，免疫规则库误判。"),
         ("Session Isolation 会话隔离快照", "多账号采用完整快照隔离：各账号持有独立的 Device Fingerprint、OAuth Credential 与本地状态，切换即物理交换数据卷，账号间零交叉污染。"),
