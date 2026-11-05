@@ -107,7 +107,10 @@ class AllowlistAndConflictTests(unittest.TestCase):
         text = extract(self.core, "shadowrocket_selfcheck")
         self.assertNotIn("defaults write", text)
         self.assertNotIn("osascript", text)
+        self.assertNotIn("agent-route/release", text)
+        self.assertNotIn("shadowrocket.conf", text)
         self.assertIn("不改写规则", text)
+        self.assertIn("不整份覆盖", text)
         self.assertIn("127.0.0.1:7890", text)
 
 

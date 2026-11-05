@@ -1421,8 +1421,11 @@ clash_verge_conflict() {
     fi
 }
 
-# H08: 只检查，不改写 Shadowrocket 规则。链式节点与强制路由仍需手工确认。
+# H08: 只检查，不改写、不整份覆盖 Shadowrocket 配置。节点、订阅和链式出口保持原样。
+# DNS 的 #proxy / 国内直连、Secure DNS、浏览器 WebRTC 策略对照 docs/shadowrocket-checklist.md，
+# 这里不下载外部规则，也不把「没有候选」当成通过。
 shadowrocket_selfcheck() {
+    # 不整份覆盖用户配置，不下载外部规则，不改节点和链式出口。
     if [ "$PROXY_MODE" != "shadowrocket" ]; then
         echo "ok:不适用"
         return
@@ -1444,7 +1447,7 @@ shadowrocket_selfcheck() {
     if [ -n "$miss" ]; then
         echo "fail:${miss# }。不改写规则，请按 docs/shadowrocket-checklist.md 手工确认"
     else
-        echo "ok:进程/VPN/7890/域名隧道通过;强制路由与链式节点仍须手工确认"
+        echo "ok:进程/VPN/7890/域名隧道通过;强制路由、链式节点、DNS分流、Secure DNS 与 WebRTC 策略未覆盖也未验证"
     fi
 }
 

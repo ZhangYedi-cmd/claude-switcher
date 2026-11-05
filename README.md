@@ -57,7 +57,7 @@ AI 服务平台的风控已经从"看 IP"进化到**全维度环境画像**：�
 | 13 | ASN 属性 | 核对网络类型；ISP 分类不等同于具体 IP 的住宅认证，Windows 检测边界见 [说明](windows/README.md#客户端语言与-asn-检查) |
 | 14 | 生态可达性 | claude.ai / api.anthropic.com 连通性验证 |
 
-上面 14 项保持原样。本 fork 另加三项硬检查，不替代它们：`出口白名单`（读取 `~/.config/claude-env/exit-ips.allow`，不另存名单）、`Clash冲突`（Clash Verge 内核或主程序与当前客户端同时存在）、`Shadowrocket自检`（只检查进程、VPN、`127.0.0.1:7890` 和域名隧道，不改写规则）。清单见 [docs/shadowrocket-checklist.md](docs/shadowrocket-checklist.md)。保镖还会结束原生 `~/.local/bin/claude`，以及出口不在这份白名单里的运行中进程。
+上面 14 项保持原样。本 fork 另加三项硬检查，不替代它们：`出口白名单`（读取 `~/.config/claude-env/exit-ips.allow`，不另存名单）、`Clash冲突`（Clash Verge 内核或主程序与当前客户端同时存在）、`Shadowrocket自检`（只检查进程、VPN、`127.0.0.1:7890` 和域名隧道，不改写规则）。清单见 [docs/shadowrocket-checklist.md](docs/shadowrocket-checklist.md)。其中 DNS / WebRTC / IPv6 的验收对照 [agent-route](https://github.com/ryuu-restart/agent-route)，只作参考，不导入、不覆盖现有节点。保镖还会结束原生 `~/.local/bin/claude`，以及出口不在这份白名单里的运行中进程。
 
 > 关于「IP 与上次一致」：除了比对上一次出口，审计引擎还会维护 48 小时出口 IP 历史——**48 小时内出口 IP 变化 ≥3 次会亮黄色警告**（不阻断启动）。IP 频繁漂移意味着账号画像在风控眼里"居无定所"，建议固定一条高质量住宅节点长期使用。禁用 IP 一致检查后不会执行出口比对，也不会写入这份历史。
 
